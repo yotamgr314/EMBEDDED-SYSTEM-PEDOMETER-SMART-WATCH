@@ -1,14 +1,17 @@
 /******************************************************************************
   Complete main.c
   - Updates time/date every second via Timer1 ISR.
-  - Supports toggling between 24?hour and 12?hour display modes using a button on RA11.
-  - Uses per?character update: only characters that differ are erased (including the 
-    extra spacing pixel) and then redrawn.
+  - Supports toggling between 24‑hour and 12‑hour display modes using a button on RA11.
+  - Uses a per‑character update method for the time and date.
+  - In 12‑hour mode, after updating the time string, it explicitly clears the 
+    rightmost two columns (columns 94-95) of the time display region to remove
+    any leftover white pixels.
   
   Note:
   - This code assumes that the OLED driver APIs (oledC_DrawString, oledC_DrawRectangle, etc.)
     are available.
-  - The __delay_ms() and __delay_us() functions require inclusion of <libpic30.h> and a proper _XTAL_FREQ.
+  - The __delay_ms() and __delay_us() functions require inclusion of <libpic30.h>
+    and a proper _XTAL_FREQ definition.
 *******************************************************************************/
 
 #include <xc.h>
@@ -102,43 +105,43 @@ static void IncrementTime(void)
 }
 
 //---------------------------------------------------------------------
-// Helper: Per-character update
+// Helper: Per-character update function.
 // Compares newStr with oldStr and only redraws changed characters.
-// Assumes a fixed 5x8 font scaled by scale_x and scale_y, with a fixed spacing.
-// Here, we define a constant spacing of 1 pixel.
-// x, y: starting top-left position.
-// fgColor: foreground color for new characters.
-// bgColor: background color used for erasing.
+// Uses a fixed 5x8 font scaled by scale_x and scale_y with 1-pixel spacing.
+// For the last character in the new string, clears only the character width.
+// If the old string is longer than the new one, clears the extra region.
 //---------------------------------------------------------------------
 static void DrawStringChanged(uint8_t x, uint8_t y, uint8_t scale_x, uint8_t scale_y,
                                 char *newStr, char *oldStr,
                                 uint16_t fgColor, uint16_t bgColor)
 {
-    const uint8_t charWidth = 5 * scale_x; // width of a character
-    const uint8_t spacing = 1;             // fixed spacing between characters
-    const uint8_t charHeight = 8 * scale_y;  // height of a character
-
+    const uint8_t charWidth = 5 * scale_x;
+    const uint8_t spacing = 1;             // Fixed spacing between characters.
+    const uint8_t charHeight = 8 * scale_y;
+    
     uint8_t newLen = (uint8_t)strlen(newStr);
     uint8_t oldLen = (uint8_t)strlen(oldStr);
-    uint8_t maxLen = (newLen > oldLen) ? newLen : oldLen;
-
-    for (uint8_t i = 0; i < maxLen; i++) {
-        char newChar = (i < newLen) ? newStr[i] : '\0';
+    
+    // For each character in the new string:
+    for (uint8_t i = 0; i < newLen; i++) {
+        char newChar = newStr[i];
         char oldChar = (i < oldLen) ? oldStr[i] : '\0';
-
-        // If the character has changed (or is missing in new string)
         if (newChar != oldChar) {
             uint8_t posX = x + i * (charWidth + spacing);
-            // Clear the character region INCLUDING the spacing pixel.
-            oledC_DrawRectangle(posX, y, posX + charWidth + spacing - 1, y + charHeight - 1, bgColor);
-            // Draw the new character if it exists.
+            // For the last character, clear only the character width (no extra spacing).
+            uint8_t widthToClear = (i == newLen - 1) ? charWidth : (charWidth + spacing);
+            oledC_DrawRectangle(posX, y, posX + widthToClear - 1, y + charHeight - 1, bgColor);
             if (newChar != '\0') {
-                char temp[2];
-                temp[0] = newChar;
-                temp[1] = '\0';
+                char temp[2] = {newChar, '\0'};
                 oledC_DrawString(posX, y, scale_x, scale_y, (uint8_t*)temp, fgColor);
             }
         }
+    }
+    // If the old string was longer than the new one, clear the extra region.
+    if (oldLen > newLen) {
+        uint8_t posX = x + newLen * (charWidth + spacing);
+        uint8_t extraWidth = (oldLen - newLen) * (charWidth + spacing) - spacing;
+        oledC_DrawRectangle(posX, y, posX + extraWidth - 1, y + charHeight - 1, bgColor);
     }
     // Update the stored old string.
     strcpy(oldStr, newStr);
@@ -146,7 +149,9 @@ static void DrawStringChanged(uint8_t x, uint8_t y, uint8_t scale_x, uint8_t sca
 
 //---------------------------------------------------------------------
 // Updated DrawTimeDate: Formats time/date and updates the OLED using
-// per-character update so that only changed digits are redrawn.
+// per-character update for both time and date.
+// For the time string, after the update, clear the rightmost columns
+// to ensure no extra white line appears when in 12-hour mode.
 //---------------------------------------------------------------------
 static void DrawTimeDate(void)
 {
@@ -176,12 +181,20 @@ static void DrawTimeDate(void)
     // Update the time display at (2,2) with scale 2 (white on black).
     DrawStringChanged(2, 2, 2, 2, newTimeString, lastTimeString, OLEDC_COLOR_WHITE, OLEDC_COLOR_BLACK);
     
+    // --- Extra Patch for 12-hour mode ---
+    // If in 12-hour mode, explicitly clear the rightmost two columns (94 and 95)
+    // in the time display area. For scale 2 and font height 16 (8*2), clear region:
+    if (use12HourFormat) {
+        // Clear columns 94 to 95 for rows from y=2 to y=2+15.
+        oledC_DrawRectangle(94, 2, 95, 2 + (8 * 2) - 1, OLEDC_COLOR_BLACK);
+    }
+    
     // Update the date display at (4,30) with scale 1 (yellow on black).
     DrawStringChanged(4, 30, 1, 1, newDateString, lastDateString, OLEDC_COLOR_YELLOW, OLEDC_COLOR_BLACK);
 }
 
 //---------------------------------------------------------------------
-// Timer1 ISR: Called every second to update the time and refresh the display.
+// Timer1 ISR: Called every second to update time and refresh the display.
 //---------------------------------------------------------------------
 void __attribute__((__interrupt__, auto_psv)) _T1Interrupt(void)
 {
@@ -222,7 +235,6 @@ int main(void)
             __delay_ms(50);  // Debounce delay.
             if (PORTAbits.RA11 == false)
             {
-                // Toggle display mode.
                 use12HourFormat = !use12HourFormat;
             }
         }
