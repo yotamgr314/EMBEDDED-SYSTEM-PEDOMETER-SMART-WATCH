@@ -1,22 +1,31 @@
-#ifndef _XTAL_FREQ
-#define _XTAL_FREQ 4000000UL
-#endif
-#include <libpic30.h>    // Provides __delay_ms() and __delay_us()
+/******************************************************************************
+  Complete main.c
+  - Updates time/date every second via Timer1 ISR.
+  - Supports toggling between 24?hour and 12?hour display modes using a button on RA11.
+  - Uses per?character update: only characters that differ are erased (including the 
+    extra spacing pixel) and then redrawn.
+  
+  Note:
+  - This code assumes that the OLED driver APIs (oledC_DrawString, oledC_DrawRectangle, etc.)
+    are available.
+  - The __delay_ms() and __delay_us() functions require inclusion of <libpic30.h> and a proper _XTAL_FREQ.
+*******************************************************************************/
 
 #include <xc.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <string.h>
+#include <libpic30.h>   // For __delay_ms() and __delay_us()
+
 #include "System/system.h"
 #include "oledDriver/oledC.h"
 #include "oledDriver/oledC_colors.h"
 #include "oledDriver/oledC_shapes.h"
 
-// ---------------------------------------------------------------------------
-// Global Definitions and Structures
-// ---------------------------------------------------------------------------
-
-// Time/Date structure
+//---------------------------------------------------------------------
+// Global Time/Date Structure
+//---------------------------------------------------------------------
 typedef struct {
     uint8_t day;
     uint8_t month;
@@ -25,7 +34,6 @@ typedef struct {
     uint8_t second;
 } WatchTime_t;
 
-// Global time variable (initialized to 01/01 00:00:00)
 static volatile WatchTime_t currentTime = {
     .day    = 1,
     .month  = 1,
@@ -34,57 +42,35 @@ static volatile WatchTime_t currentTime = {
     .second = 0
 };
 
-// Days per month (February fixed to 28 days)
-static const uint8_t daysInMonth[12] = {
-    31, // January
-    28, // February
-    31, // March
-    30, // April
-    31, // May
-    30, // June
-    31, // July
-    31, // August
-    30, // September
-    31, // October
-    30, // November
-    31  // December
-};
+// For simplicity, February is fixed to 28 days.
+static const uint8_t daysInMonth[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
 
-// Define the two modes for the watch display.
-typedef enum {
-    TIME_MODE = 0,
-    PEDOMETER_MODE = 1
-} WatchMode_t;
+//---------------------------------------------------------------------
+// Global display mode: false = 24-hour; true = 12-hour (with AM/PM)
+// Volatile because it's modified in main() and read in the ISR.
+volatile bool use12HourFormat = false;
 
-volatile WatchMode_t currentMode = TIME_MODE;
-
-// Simulated pedometer variables.
-static volatile uint16_t stepsPerMinute = 0;
-static volatile bool iconToggle = false;  // Used to alternate the animated icon
-
-// ---------------------------------------------------------------------------
-// Timer1 Setup: 1-second interrupt
-// ---------------------------------------------------------------------------
+//---------------------------------------------------------------------
+// Timer1 Initialization (assumes Fcy ~4MHz)
+//---------------------------------------------------------------------
 static void InitializeTimer1(void)
 {
     T1CONbits.TON = 0;      // Stop Timer1
-    T1CONbits.TCS = 0;      // Use internal clock (Fcy)
-    T1CONbits.TCKPS = 3;    // Prescaler 1:256
-    // Assuming Fcy ~4 MHz, Timer1 frequency = 4MHz / 256 = 15625 Hz.
-    // For a 1-second interval, PR1 = 15625 - 1 = 15624.
+    T1CONbits.TCS = 0;      // Use internal clock
+    T1CONbits.TCKPS = 3;    // 1:256 prescaler
+    // With Fcy ~4MHz, Timer1 frequency = 4MHz/256 = 15625 Hz.
+    // For a 1-second period, PR1 = 15625 - 1 = 15624.
     PR1 = 15624;
     TMR1 = 0;
-    
     IFS0bits.T1IF = 0;      // Clear Timer1 interrupt flag
     IEC0bits.T1IE = 1;      // Enable Timer1 interrupt
-    IPC0bits.T1IP = 4;      // Set interrupt priority
-
+    IPC0bits.T1IP = 4;      // Set Timer1 interrupt priority
     T1CONbits.TON = 1;      // Start Timer1
 }
 
-// ---------------------------------------------------------------------------
-// Helper function to increment time/date once per second
-// ---------------------------------------------------------------------------
+//---------------------------------------------------------------------
+// Increment the global time by one second (with rollover logic)
+//---------------------------------------------------------------------
 static void IncrementTime(void)
 {
     currentTime.second++;
@@ -107,7 +93,7 @@ static void IncrementTime(void)
                     currentTime.month++;
                     if (currentTime.month > 12)
                     {
-                        currentTime.month = 1; 
+                        currentTime.month = 1;
                     }
                 }
             }
@@ -115,134 +101,132 @@ static void IncrementTime(void)
     }
 }
 
-// ---------------------------------------------------------------------------
-// Function to draw the Time & Date display (TIME_MODE)
-// ---------------------------------------------------------------------------
-static void DrawTimeDate(void)
+//---------------------------------------------------------------------
+// Helper: Per-character update
+// Compares newStr with oldStr and only redraws changed characters.
+// Assumes a fixed 5x8 font scaled by scale_x and scale_y, with a fixed spacing.
+// Here, we define a constant spacing of 1 pixel.
+// x, y: starting top-left position.
+// fgColor: foreground color for new characters.
+// bgColor: background color used for erasing.
+//---------------------------------------------------------------------
+static void DrawStringChanged(uint8_t x, uint8_t y, uint8_t scale_x, uint8_t scale_y,
+                                char *newStr, char *oldStr,
+                                uint16_t fgColor, uint16_t bgColor)
 {
-    // Clear a portion of the screen (top area) where time/date is shown.
-    oledC_DrawRectangle(0, 0, 95, 50, OLEDC_COLOR_BLACK);
+    const uint8_t charWidth = 5 * scale_x; // width of a character
+    const uint8_t spacing = 1;             // fixed spacing between characters
+    const uint8_t charHeight = 8 * scale_y;  // height of a character
 
-    // Format time as "HH:MM:SS" (24-hour format)
-    char timeString[16];
-    sprintf(timeString, "%02u:%02u:%02u", currentTime.hour, currentTime.minute, currentTime.second);
+    uint8_t newLen = (uint8_t)strlen(newStr);
+    uint8_t oldLen = (uint8_t)strlen(oldStr);
+    uint8_t maxLen = (newLen > oldLen) ? newLen : oldLen;
 
-    // Format date as "DD/MM"
-    char dateString[16];
-    sprintf(dateString, "%02u/%02u", currentTime.day, currentTime.month);
+    for (uint8_t i = 0; i < maxLen; i++) {
+        char newChar = (i < newLen) ? newStr[i] : '\0';
+        char oldChar = (i < oldLen) ? oldStr[i] : '\0';
 
-    // Draw time (scale 2 for larger digits) and date (scale 1)
-    oledC_DrawString(2, 2, 2, 2, (uint8_t*)timeString, OLEDC_COLOR_WHITE);
-    oledC_DrawString(4, 30, 1, 1, (uint8_t*)dateString, OLEDC_COLOR_YELLOW);
+        // If the character has changed (or is missing in new string)
+        if (newChar != oldChar) {
+            uint8_t posX = x + i * (charWidth + spacing);
+            // Clear the character region INCLUDING the spacing pixel.
+            oledC_DrawRectangle(posX, y, posX + charWidth + spacing - 1, y + charHeight - 1, bgColor);
+            // Draw the new character if it exists.
+            if (newChar != '\0') {
+                char temp[2];
+                temp[0] = newChar;
+                temp[1] = '\0';
+                oledC_DrawString(posX, y, scale_x, scale_y, (uint8_t*)temp, fgColor);
+            }
+        }
+    }
+    // Update the stored old string.
+    strcpy(oldStr, newStr);
 }
 
-// ---------------------------------------------------------------------------
-// Function to draw the Pedometer display (PEDOMETER_MODE)
-// ---------------------------------------------------------------------------
-static void DrawPedometerDisplay(void)
+//---------------------------------------------------------------------
+// Updated DrawTimeDate: Formats time/date and updates the OLED using
+// per-character update so that only changed digits are redrawn.
+//---------------------------------------------------------------------
+static void DrawTimeDate(void)
 {
-    // Clear the full display to black.
-    oledC_DrawRectangle(0, 0, 95, 95, OLEDC_COLOR_BLACK);
-
-    // Draw an animated icon in the top-left corner.
-    // When iconToggle is true, draw a filled circle; else draw a ring.
-    if (iconToggle)
+    static char lastTimeString[20] = "";
+    static char lastDateString[16] = "";
+    
+    char newTimeString[20];
+    char newDateString[16];
+    
+    // Format the time string.
+    if (use12HourFormat)
     {
-        oledC_DrawCircle(15, 15, 10, OLEDC_COLOR_GREEN);
+        uint8_t hour12 = currentTime.hour % 12;
+        if (hour12 == 0)
+            hour12 = 12;
+        const char *period = (currentTime.hour < 12) ? "AM" : "PM";
+        sprintf(newTimeString, "%02u:%02u:%02u %s", hour12, currentTime.minute, currentTime.second, period);
     }
     else
     {
-        oledC_DrawRing(15, 15, 10, 2, OLEDC_COLOR_GREEN);
+        sprintf(newTimeString, "%02u:%02u:%02u", currentTime.hour, currentTime.minute, currentTime.second);
     }
-
-    // Display the simulated steps count.
-    char stepsString[20];
-    sprintf(stepsString, "Steps: %u", stepsPerMinute);
-    oledC_DrawString(2, 40, 1, 1, (uint8_t*)stepsString, OLEDC_COLOR_WHITE);
+    
+    // Format the date string.
+    sprintf(newDateString, "%02u/%02u", currentTime.day, currentTime.month);
+    
+    // Update the time display at (2,2) with scale 2 (white on black).
+    DrawStringChanged(2, 2, 2, 2, newTimeString, lastTimeString, OLEDC_COLOR_WHITE, OLEDC_COLOR_BLACK);
+    
+    // Update the date display at (4,30) with scale 1 (yellow on black).
+    DrawStringChanged(4, 30, 1, 1, newDateString, lastDateString, OLEDC_COLOR_YELLOW, OLEDC_COLOR_BLACK);
 }
 
-// ---------------------------------------------------------------------------
-// Button debouncing: Checks if S1 (RA11) is pressed (active low)
-// ---------------------------------------------------------------------------
-static bool IsS1Pressed(void)
-{
-    if (!PORTAbits.RA11)
-    {
-        __delay_ms(50); // Debounce delay
-        if (!PORTAbits.RA11)
-            return true;
-    }
-    return false;
-}
-
-// ---------------------------------------------------------------------------
-// Timer1 Interrupt Service Routine (ISR)
-// Updates the time and refreshes the display based on current mode.
-// ---------------------------------------------------------------------------
+//---------------------------------------------------------------------
+// Timer1 ISR: Called every second to update the time and refresh the display.
+//---------------------------------------------------------------------
 void __attribute__((__interrupt__, auto_psv)) _T1Interrupt(void)
 {
-    IFS0bits.T1IF = 0; // Clear Timer1 interrupt flag
-
-    // Update the global time.
+    IFS0bits.T1IF = 0;  // Clear Timer1 interrupt flag
     IncrementTime();
-
-    if (currentMode == TIME_MODE)
-    {
-        // In TIME_MODE, update the time/date display.
-        DrawTimeDate();
-    }
-    else if (currentMode == PEDOMETER_MODE)
-    {
-        // In PEDOMETER_MODE, simulate step count update.
-        stepsPerMinute += 5;       // Increase simulated step count
-        iconToggle = !iconToggle;  // Toggle animated icon state
-        DrawPedometerDisplay();
-    }
+    DrawTimeDate();
 }
 
-// ---------------------------------------------------------------------------
-// Main Function - Merged Phase 1 and Phase 2
-// ---------------------------------------------------------------------------
+//---------------------------------------------------------------------
+// Main: Initialize system, clear OLED screen, start timer, and poll button.
+//---------------------------------------------------------------------
 int main(void)
 {
-    // Initialize system, OLED, etc.
+    // Initialize system (clock, pins, OLED, etc.)
     SYSTEM_Initialize();
-
-    // Set OLED boundaries (assumes a 96x96 display)
+    
+    // Set OLED boundaries.
     oledC_setColumnAddressBounds(0, 95);
     oledC_setRowAddressBounds(0, 95);
-
-    // Clear OLED display entirely (set background to black)
+    
+    // Clear the entire OLED screen to black.
     oledC_startWritingDisplay();
-    for (uint16_t i = 0; i < 96 * 96; i++)
-    {
+    for (uint16_t i = 0; i < 96 * 96; i++) {
         oledC_sendColorInt(OLEDC_COLOR_BLACK);
     }
     oledC_stopWritingDisplay();
-
-    // Configure S1 button on RA11 as input.
-    TRISAbits.TRISA11 = 1;
-
-    // Initialize Timer1 for 1-second interrupts.
+    
+    // Initialize Timer1 for 1-second updates.
     InitializeTimer1();
-
-    // Main loop: poll S1 to toggle between TIME_MODE and PEDOMETER_MODE.
+    
+    // Main loop: Poll button on RA11 (active low) to toggle display mode.
+    bool lastButtonState = true;  // Assume button is not pressed.
     while (1)
     {
-        if (IsS1Pressed())
+        bool currentButtonState = PORTAbits.RA11;  // Read button state.
+        if (lastButtonState && (currentButtonState == false))
         {
-            // Toggle display mode on button press.
-            if (currentMode == TIME_MODE)
+            __delay_ms(50);  // Debounce delay.
+            if (PORTAbits.RA11 == false)
             {
-                currentMode = PEDOMETER_MODE;
+                // Toggle display mode.
+                use12HourFormat = !use12HourFormat;
             }
-            else
-            {
-                currentMode = TIME_MODE;
-            }
-            // Delay to prevent bouncing or multiple toggles.
-            __delay_ms(500);
         }
+        lastButtonState = currentButtonState;
     }
     
     return 0;
