@@ -4,13 +4,13 @@ Tool Name:
   c:\program files\microchip\xc16\v2.10\bin\bin\..\bin/elf-ld.exe
 
 Command:
-  -TC:\\Users\\yotam\\AppData\\Local\\Temp\\tmp000117a4.00 \
-  -TC:\\Users\\yotam\\AppData\\Local\\Temp\\tmp000117a4.01 \
-  -TC:\\Users\\yotam\\AppData\\Local\\Temp\\tmp000117a4.02 \
-  -TC:\\Users\\yotam\\AppData\\Local\\Temp\\tmp000117a4.03 \
-  -TC:\\Users\\yotam\\AppData\\Local\\Temp\\tmp000117a4.04 \
-  -TC:\\Users\\yotam\\AppData\\Local\\Temp\\tmp000117a4.05 \
-  -TC:\\Users\\yotam\\AppData\\Local\\Temp\\tmp000117a4.06 \
+  -TC:\\Users\\yotam\\AppData\\Local\\Temp\\tmp0000142c.00 \
+  -TC:\\Users\\yotam\\AppData\\Local\\Temp\\tmp0000142c.01 \
+  -TC:\\Users\\yotam\\AppData\\Local\\Temp\\tmp0000142c.02 \
+  -TC:\\Users\\yotam\\AppData\\Local\\Temp\\tmp0000142c.03 \
+  -TC:\\Users\\yotam\\AppData\\Local\\Temp\\tmp0000142c.04 \
+  -TC:\\Users\\yotam\\AppData\\Local\\Temp\\tmp0000142c.05 \
+  -TC:\\Users\\yotam\\AppData\\Local\\Temp\\tmp0000142c.06 \
   -p24FJ256GA705 \
   -o \
   dist/default/debug/HW02.debug.elf \
